@@ -16,8 +16,24 @@ This Docker application fetches local and marine weather forecasts for Alaska's 
 Environment variables (set in docker-compose.yml):
 
 - `ZIP_CODES`: Comma-separated list of zip codes (default: "99660,99591")
-- `UPDATE_INTERVAL`: Update interval in seconds (default: 3600 = 1 hour)
-- `TZ`: Timezone (set to: America/Anchorage)
+- `UPDATE_INTERVAL`: Update interval in seconds (default: 3600 = 1 hour). NWS serves the forecast with a one-hour cache, so a shorter interval only returns the same answer.
+- `TZ`: Timezone (set to: America/Anchorage). All times written by the service use this named zone, so the switch between AKST and AKDT is automatic.
+- `USER_AGENT`: How the service identifies itself to NWS (default: `weather-forecast-collector/1.1`). NWS asks for an app name plus a contact.
+- `NTFY_URL`, `NTFY_TOPIC`, `NTFY_TOKEN`: Where failure alerts are pushed. Alerts are skipped if URL or topic is unset. The ntfy server on this host needs the token.
+- `STALE_FORECAST_HOURS` (default 24), `FETCH_RETRIES` (default 3), `POINTS_CACHE_SECONDS` (default 86400), `DATA_DIR` (default `/data`): rarely need changing.
+- `RUN_ONCE=1`: run one cycle and exit, for testing against a scratch data folder.
+- `ALERT_AFTER_FAILURES` (default 3): cycles in a row a source-side problem must last before one alert is pushed.
+- `CONNECTIVITY_PROBES` (default `1.1.1.1:443,8.8.8.8:53`): hosts tried with a bare TCP connect to decide whether our own internet is up.
+
+## Behaviour worth knowing
+
+- **Timestamps** in the JSON are Alaska time with the UTC offset, for example `2026-11-16T17:48:11-09:00` (`-08:00` in summer).
+- **Each island's JSON** holds `local_forecast` (7 periods), `hourly_forecast` (24 hours) and `marine_forecast`.
+- **Writes are atomic**: each file is written to `<name>.tmp` and renamed, so readers never see a partial file.
+- **On a failed fetch** the previous island forecast is kept, with its old timestamp, instead of being replaced by an empty one.
+- **Failures are diagnosed** (`diagnose.py`) as `local_network` (our internet), `source_down` (NWS not answering), `source_stale` (NWS answering with an old forecast) or `our_error` (format changed, URL gone, refused). The cause is written to `forecast_health.json`, `forecast_report.txt` and the alert. Our own fault alerts at once; a source-side problem alerts once after three cycles; an internet outage here is only summarised when the link returns.
+- **Container health** (`docker ps`) is healthy while `latest_forecast.json` is newer than two update intervals plus ten minutes.
+- **Readers on this host**: the hourly cron job `pribiloftraffic/scripts/update_forecast_data.sh` copies three files into the webroot as `snp_forecast.json`, `stg_forecast.json` and `marine_forecast.json`; `pribobs_commentary.py` reads `latest_forecast.txt` directly. Do not rename the output files.
 
 ## Output Files
 
@@ -68,7 +84,7 @@ docker-compose down weather-forecast
 The application includes comprehensive health monitoring to ensure data integrity:
 
 - **API availability tracking** - Records every fetch attempt
-- **Stale forecast detection** - Alerts if forecasts are >12 hours old
+- **Stale forecast detection** - Alerts while the latest forecast is more than 24 hours old
 - **Outage detection** - Tracks when NWS API is down
 - **Uptime statistics** - Calculates reliability percentage
 - **Status reports** - Generates `forecast_report.txt`

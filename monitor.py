@@ -8,14 +8,36 @@ Ensures no stale or fake forecasts are served.
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from pathlib import Path
 
+import diagnose
 
-DATA_DIR = "/data"
+
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 MONITOR_FILE = os.path.join(DATA_DIR, "forecast_health.json")
 REPORT_FILE = os.path.join(DATA_DIR, "forecast_report.txt")
+
+# A forecast whose NWS issue time is older than this is called stale.
+STALE_FORECAST_HOURS = float(os.getenv("STALE_FORECAST_HOURS", "24"))
+# A location nobody has tried to fetch for this long is retired: it stays in
+# the health file as history but no longer raises alerts.
+RETIRED_AFTER_HOURS = float(os.getenv("RETIRED_AFTER_HOURS", "24"))
+# How many cycles in a row a problem on the source's end (not answering, or
+# not updating) must last before one alert is pushed. A fault on our side
+# that needs a fix is pushed at once; our own internet being down is never
+# pushed while it lasts (the push could not get out) and is summarised when
+# the link comes back.
+ALERT_AFTER_FAILURES = int(os.getenv("ALERT_AFTER_FAILURES", "3"))
+
+
+def _atomic_write(path: str, text: str) -> None:
+    """Write to a temp file then rename, so readers never see a partial file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, 'w') as f:
+        f.write(text)
+    os.replace(tmp, path)
 
 
 class ForecastMonitor:
@@ -24,6 +46,15 @@ class ForecastMonitor:
     def __init__(self):
         """Initialize the monitor."""
         self.health_data = self._load_health_data()
+        # Messages waiting to be pushed; collected by take_notifications().
+        self._problems: List[str] = []
+        self._recoveries: List[str] = []
+
+    def take_notifications(self):
+        """Return (problems, recoveries) queued since the last call."""
+        problems, recoveries = self._problems, self._recoveries
+        self._problems, self._recoveries = [], []
+        return problems, recoveries
         
     def _load_health_data(self) -> Dict:
         """Load existing health data or create new."""
@@ -42,10 +73,24 @@ class ForecastMonitor:
     def _save_health_data(self) -> None:
         """Save health data to file."""
         try:
-            with open(MONITOR_FILE, 'w') as f:
-                json.dump(self.health_data, f, indent=2)
+            _atomic_write(MONITOR_FILE, json.dumps(self.health_data, indent=2))
         except Exception as e:
             print(f"Error saving health data: {e}")
+
+    def _is_retired(self, loc: Dict) -> bool:
+        """True if this location has not been attempted recently.
+
+        Covers keys left behind by old naming schemes (for example
+        '99660_marine'), which would otherwise report an outage forever.
+        """
+        last_attempt = loc.get("last_attempt") or loc.get("last_failure") or loc.get("last_success")
+        if not last_attempt:
+            return True
+        try:
+            age = datetime.utcnow() - datetime.fromisoformat(last_attempt)
+        except ValueError:
+            return True
+        return age > timedelta(hours=RETIRED_AFTER_HOURS)
     
     def record_attempt(
         self,
@@ -53,7 +98,8 @@ class ForecastMonitor:
         forecast_type: str,
         success: bool,
         forecast_time: Optional[str] = None,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        cause: Optional[str] = None
     ) -> None:
         """
         Record a forecast fetch attempt.
@@ -64,6 +110,7 @@ class ForecastMonitor:
             success: Whether fetch succeeded
             forecast_time: Timestamp from forecast data
             error_message: Error message if failed
+            cause: Whose end a failure is on (see diagnose.py); None if unknown
         """
         now = datetime.utcnow().isoformat()
         
@@ -93,15 +140,32 @@ class ForecastMonitor:
             if forecast_time:
                 loc["last_forecast_time"] = forecast_time
                 
-                # Check if forecast is stale (older than 12 hours)
+                # Check if the forecast NWS handed us is an old one. Both
+                # times are compared as zone-aware values (the old code
+                # mixed aware and naive times, which raised and was
+                # silently ignored, so this check never ran).
                 try:
                     forecast_dt = datetime.fromisoformat(forecast_time.replace('Z', '+00:00'))
-                    now_dt = datetime.utcnow()
-                    age_hours = (now_dt - forecast_dt).total_seconds() / 3600
-                    
-                    if age_hours > 12:
+                    if forecast_dt.tzinfo is None:
+                        forecast_dt = forecast_dt.replace(tzinfo=timezone.utc)
+                    age_hours = (datetime.now(timezone.utc) - forecast_dt).total_seconds() / 3600
+
+                    was_stale = loc.get("forecast_stale", False)
+                    loc["forecast_stale"] = age_hours > STALE_FORECAST_HOURS
+                    if loc["forecast_stale"]:
                         loc["stale_forecast_count"] += 1
                         loc["last_stale_warning"] = now
+                        loc["stale_cycles"] = loc.get("stale_cycles", 0) + 1
+                        if loc["stale_cycles"] == ALERT_AFTER_FAILURES:
+                            loc["stale_alert_sent"] = True
+                            self._problems.append(
+                                f"{location}: forecast is {age_hours:.0f} hours old - "
+                                + diagnose.describe(diagnose.SOURCE_STALE))
+                    else:
+                        if was_stale and loc.get("stale_alert_sent"):
+                            self._recoveries.append(f"{location}: forecast is being updated again")
+                        loc["stale_cycles"] = 0
+                        loc["stale_alert_sent"] = False
                 except Exception:
                     pass
             
@@ -114,9 +178,21 @@ class ForecastMonitor:
                 loc["outage_history"].append({
                     "start": loc["current_outage_start"],
                     "end": now,
-                    "duration_minutes": outage_duration
+                    "duration_minutes": outage_duration,
+                    "cause": loc.get("current_cause")
                 })
+                # Say it is over if we said it had started, or if it was
+                # our own link and lasted long enough to be worth knowing.
+                was_local = loc.get("current_cause") == diagnose.LOCAL_NETWORK
+                long_enough = loc.get("consecutive_failures", 0) >= ALERT_AFTER_FAILURES
+                if loc.get("alert_sent") or (was_local and long_enough):
+                    self._recoveries.append(
+                        f"{location}: back after {outage_duration} minutes - was: "
+                        + diagnose.describe(loc.get("current_cause")))
                 loc["current_outage_start"] = None
+            loc["consecutive_failures"] = 0
+            loc["current_cause"] = None
+            loc["alert_sent"] = False
         else:
             loc["failed_attempts"] += 1
             loc["last_failure"] = now
@@ -125,6 +201,24 @@ class ForecastMonitor:
             # Mark start of outage if this is first failure
             if not loc["current_outage_start"]:
                 loc["current_outage_start"] = now
+
+            loc["consecutive_failures"] = loc.get("consecutive_failures", 0) + 1
+            loc["current_cause"] = cause
+
+            # Decide whether this failure is worth a push (once per outage).
+            if not loc.get("alert_sent"):
+                if cause == diagnose.LOCAL_NETWORK:
+                    push = False  # cannot get out; summarised on recovery
+                elif cause == diagnose.OUR_ERROR:
+                    push = True   # ours to fix: say so straight away
+                else:
+                    push = loc["consecutive_failures"] >= ALERT_AFTER_FAILURES
+                if push:
+                    loc["alert_sent"] = True
+                    self._problems.append(
+                        f"{location}: no {forecast_type} forecast for "
+                        f"{loc['consecutive_failures']} cycle(s) - "
+                        + diagnose.describe(cause, error_message))
         
         self.health_data["last_updated"] = now
         self._save_health_data()
@@ -164,8 +258,10 @@ class ForecastMonitor:
             )
             return {
                 "status": "offline",
-                "message": f"API offline for {outage_duration} minutes",
+                "message": f"no data for {outage_duration} minutes - "
+                           + diagnose.describe(loc.get("current_cause")),
                 "outage_start": loc["current_outage_start"],
+                "cause": loc.get("current_cause"),
                 "last_error": loc.get("last_error", "Unknown error")
             }
         
@@ -175,11 +271,13 @@ class ForecastMonitor:
             time_since = datetime.utcnow() - last_success
             
             if time_since < timedelta(hours=2):
-                # Check for stale forecasts
-                if loc.get("stale_forecast_count", 0) > 0:
+                # Warn only while the latest forecast is stale, not forever
+                # after the first stale one.
+                if loc.get("forecast_stale"):
                     return {
                         "status": "warning",
-                        "message": f"API online but serving stale forecasts ({loc['stale_forecast_count']} times)",
+                        "message": "forecast is old - " + diagnose.describe(diagnose.SOURCE_STALE),
+                        "cause": diagnose.SOURCE_STALE,
                         "last_success": loc["last_success"]
                     }
                 
@@ -224,8 +322,10 @@ class ForecastMonitor:
         alerts = []
         
         for location, loc in self.health_data["locations"].items():
+            if self._is_retired(loc):
+                continue
             status = self.get_location_status(location)
-            
+
             if status["status"] == "offline":
                 alerts.append(f"🔴 {location}: {status['message']}")
             elif status["status"] == "warning":
@@ -305,7 +405,8 @@ class ForecastMonitor:
                     lines.append(f"   Recent Outages:")
                     for outage in recent_outages:
                         lines.append(f"     - {outage['duration_minutes']} minutes "
-                                   f"(ended {outage['end']})")
+                                   f"(ended {outage['end']})"
+                                   + (f" [{outage['cause']}]" if outage.get('cause') else ""))
         
         lines.append("\n" + "=" * 70)
         
@@ -322,9 +423,7 @@ class ForecastMonitor:
     def save_report(self) -> None:
         """Generate and save status report to file."""
         try:
-            report = self.generate_report()
-            with open(REPORT_FILE, 'w') as f:
-                f.write(report)
+            _atomic_write(REPORT_FILE, self.generate_report())
         except Exception as e:
             print(f"Error saving report: {e}")
     

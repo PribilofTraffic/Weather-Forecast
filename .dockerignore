@@ -1,0 +1,10 @@
+data/
+.git
+.gitignore
+.env
+*.md
+*.log
+*.sh
+*.yml
+__pycache__/
+*.pyc
