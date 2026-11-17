@@ -33,7 +33,7 @@ Environment variables (set in docker-compose.yml):
 - **On a failed fetch** the previous island forecast is kept, with its old timestamp, instead of being replaced by an empty one.
 - **Failures are diagnosed** (`diagnose.py`) as `local_network` (our internet), `source_down` (NWS not answering), `source_stale` (NWS answering with an old forecast) or `our_error` (format changed, URL gone, refused). The cause is written to `forecast_health.json`, `forecast_report.txt` and the alert. Our own fault alerts at once; a source-side problem alerts once after three cycles; an internet outage here is only summarised when the link returns.
 - **Container health** (`docker ps`) is healthy while `latest_forecast.json` is newer than two update intervals plus ten minutes.
-- **Readers on this host**: `pribiloftraffic/data/snp_forecast.json`, `stg_forecast.json` and `marine_forecast.json` are symlinks to `st._paul_island_99660.json`, `st._george_island_99591.json` and `pribilof_island_waters.json` in this folder's `data/`, so the site reads these files directly; `pribobs_commentary.py` reads `latest_forecast.txt` directly. Do not move `data/` or rename the output files. (`sync_to_web.sh` and the old hourly cron copy are no longer needed.)
+- **Readers**: a web server and other scripts on the host read these files straight from the `data/` folder (for example through symlinks from the web root), so new output is visible as soon as it is written. Do not move `data/` or rename the output files without updating whatever points at them. `sync_to_web.sh` is an optional helper for setups that copy the files instead.
 
 ## Output Files
 
@@ -112,22 +112,22 @@ The report shows:
 
 **View all forecasts (combined):**
 ```bash
-cat /opt/dockers/weather-forecast/data/latest_forecast.txt
+cat data/latest_forecast.txt
 ```
 
 **View St. Paul Island forecast:**
 ```bash
-cat /opt/dockers/weather-forecast/data/st._paul_island_99660.txt
+cat data/st._paul_island_99660.txt
 ```
 
 **View St. George Island forecast:**
 ```bash
-cat /opt/dockers/weather-forecast/data/st._george_island_99591.txt
+cat data/st._george_island_99591.txt
 ```
 
 **View marine forecast (Pribilof Islands Nearshore Waters):**
 ```bash
-cat /opt/dockers/weather-forecast/data/pribilof_island_waters.txt
+cat data/pribilof_island_waters.txt
 ```
 
 ### Stop the service:

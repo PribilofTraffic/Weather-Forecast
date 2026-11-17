@@ -1,8 +1,17 @@
 #!/bin/bash
 # Sync weather forecast data from Docker to web directories
+#
+# Optional: only for setups that copy the forecast files into a web root
+# instead of linking to them.
+#
+# Inputs (environment):
+#   WEB_DATA     required: the web server's data folder to copy into
+#   DOCKER_DATA  optional: the collector's data folder (default: ./data
+#                next to this script)
+# Output: snp_forecast.json, stg_forecast.json, marine_forecast.json in WEB_DATA
 
-DOCKER_DATA="/opt/dockers/weather-forecast/data"
-WEB_DATA="/var/www/html/pribiloftraffic/data"
+DOCKER_DATA="${DOCKER_DATA:-$(cd "$(dirname "$0")" && pwd)/data}"
+WEB_DATA="${WEB_DATA:?Set WEB_DATA to the web server data folder, e.g. WEB_DATA=/path/to/site/data $0}"
 
 # Ensure web data directory exists
 mkdir -p "$WEB_DATA"

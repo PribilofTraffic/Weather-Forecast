@@ -17,7 +17,7 @@
 
 **Why did I need this?**
 - Monitor weather conditions in remote Alaska locations
-- [Possible use cases: Weather analysis, marine operations, data visualization for pribiloftraffic website]
+- Use cases: weather analysis, marine operations, forecast display on the website
 - Need consistent data format for downstream applications
 - Want local cache to avoid repeated NOAA API calls
 
@@ -179,7 +179,7 @@ environment:
 - Renames files for web consistency (snp_forecast.json, stg_forecast.json)
 
 **Script**: `sync_to_web.sh`
-**Destination**: `/var/www/html/pribiloftraffic/data`
+**Destination**: `<web-root>/data`
 
 **Why not automated**:
 - Web server might not always exist
@@ -360,7 +360,7 @@ curl "https://tgftp.nws.noaa.gov/data/raw/fz/fzak52.pafc.cwf.alu.txt"
 ### Optional Dependency: Web Server (for sync)
 
 - **Status**: ⚠️ OPTIONAL
-- **Path**: /var/www/html/pribiloftraffic/data
+- **Path**: <web-root>/data
 - **Purpose**: Serve forecasts via web server
 - **If missing**: sync_to_web.sh fails but collector still works
 
@@ -400,7 +400,7 @@ NOAA Weather Services                    Docker Container
                                                     ↓
                                            sync_to_web.sh (manual)
                                                     ↓
-                                        /var/www/html/pribiloftraffic/data
+                                        <web-root>/data
                                         ├── snp_forecast.json
                                         ├── stg_forecast.json
                                         └── marine_forecast.json
@@ -547,7 +547,7 @@ Human-readable status report showing online/offline status, uptime %, alerts
 
 6. [ ] Create optional helper scripts:
    - view_status.sh: Display forecast_report.txt
-   - sync_to_web.sh: Copy forecasts to /var/www/html/pribiloftraffic/data
+   - sync_to_web.sh: Copy forecasts to <web-root>/data
 
 7. [ ] Test NOAA APIs:
    ```bash
@@ -572,11 +572,11 @@ Human-readable status report showing online/offline status, uptime %, alerts
    docker compose logs -f weather-forecast
 
    # View forecasts
-   cat /opt/dockers/weather-forecast/data/latest_forecast.txt
-   cat /opt/dockers/weather-forecast/data/pribilof_island_waters.txt
+   cat data/latest_forecast.txt
+   cat data/pribilof_island_waters.txt
 
    # View health status
-   cat /opt/dockers/weather-forecast/data/forecast_report.txt
+   cat data/forecast_report.txt
    # OR
    ./view_status.sh
    ```
@@ -688,26 +688,26 @@ docker compose restart weather-forecast
 ### View Forecasts:
 ```bash
 # Combined forecast
-cat /opt/dockers/weather-forecast/data/latest_forecast.txt
+cat data/latest_forecast.txt
 
 # St. Paul Island
-cat /opt/dockers/weather-forecast/data/st._paul_island_99660.txt
+cat data/st._paul_island_99660.txt
 
 # St. George Island
-cat /opt/dockers/weather-forecast/data/st._george_island_99591.txt
+cat data/st._george_island_99591.txt
 
 # Marine forecast
-cat /opt/dockers/weather-forecast/data/pribilof_island_waters.txt
+cat data/pribilof_island_waters.txt
 
 # Health status
-cat /opt/dockers/weather-forecast/data/forecast_report.txt
+cat data/forecast_report.txt
 # OR
 ./view_status.sh
 ```
 
 ### Sync to Web (Optional):
 ```bash
-cd /opt/dockers/weather-forecast
+cd weather-forecast
 sudo ./sync_to_web.sh
 ```
 
@@ -722,10 +722,10 @@ curl "https://tgftp.nws.noaa.gov/data/raw/fz/fzak52.pafc.cwf.alu.txt" \
   | grep -A 30 PKZ766
 
 # Check data files
-ls -lh /opt/dockers/weather-forecast/data/
+ls -lh data/
 
 # Check health monitoring
-cat /opt/dockers/weather-forecast/data/forecast_health.json | jq
+cat data/forecast_health.json | jq
 
 # Check logs for errors
 docker compose logs --tail=100 weather-forecast | grep -i error
@@ -733,11 +733,11 @@ docker compose logs --tail=100 weather-forecast | grep -i error
 
 ---
 
-**Status**: ✅ Running continuously since 2024-10
+**Status**: ✅ Running continuously since October 2025
 **Uptime**: Excellent (auto-restart on failure)
 **Update Frequency**: 1 hour
 **Data Freshness**: <2 hours (typically <1 hour)
 
-**Maintained by**: [Your name]
-**Created**: 2024-10 (estimated)
-**Last updated**: 2026-01-12
+**Maintained by**: PribilofTraffic
+**Created**: 2025-10
+**Last updated**: 2026-11-16

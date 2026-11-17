@@ -41,7 +41,7 @@ def local_now() -> datetime:
 def atomic_write(path: str, text: str) -> None:
     """Write to a temp file, then rename over the target.
 
-    Readers (nginx, the cron copy, pribobs_commentary.py) see either the old
+    Readers (the web server and other scripts on the host) see either the old
     file or the new one, never a half-written one. The temp file is created
     with open() so it keeps the normal 0644 mode and stays world-readable.
     """
