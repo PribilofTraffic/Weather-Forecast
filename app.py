@@ -12,6 +12,7 @@ from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 import logging
 import os
+import re
 
 import diagnose
 from monitor import ForecastMonitor
@@ -29,8 +30,89 @@ FETCH_RETRIES = int(os.getenv('FETCH_RETRIES', '3'))
 # matching the cache lifetime NWS puts on that answer).
 POINTS_CACHE_SECONDS = int(os.getenv('POINTS_CACHE_SECONDS', '86400'))
 NWS_API_URL = os.getenv('NWS_API_URL', 'https://api.weather.gov')
-MARINE_URL = os.getenv(
-    'MARINE_URL', 'https://tgftp.nws.noaa.gov/data/raw/fz/fzak52.pafc.cwf.alu.txt')
+
+# --- Where to fetch forecasts for -------------------------------------------
+# Two ways to say where, usable together:
+#   ZIP_CODES   comma-separated US zip codes, e.g. "99501,99701"
+#   LOCATIONS   "Name,lat,lon" entries separated by ";", for places a zip code
+#               does not describe well, e.g. "Cabin,61.52,-149.63;Boat,60.12,-149.44"
+# With neither set, the two built-in Pribilof Islands zip codes are used.
+#
+# Built-in zip codes need no lookup. Any other zip code is turned into
+# coordinates once through ZIP_LOOKUP_URL and remembered in zip_cache.json.
+BUILTIN_ZIPS = {
+    '99660': {'lat': 57.1253, 'lon': -170.2806, 'city': 'St. Paul Island'},
+    '99591': {'lat': 56.5983, 'lon': -169.5464, 'city': 'St. George Island'},
+}
+ZIP_LOOKUP_URL = os.getenv('ZIP_LOOKUP_URL', 'https://api.zippopotam.us/us/{zip}')
+ZIP_CACHE_FILE = os.path.join(DATA_DIR, 'zip_cache.json')
+
+_locations_env = os.getenv('LOCATIONS', '').strip()
+_zips_env = os.environ.get('ZIP_CODES')
+if _zips_env is None:
+    _zips_env = '' if _locations_env else '99660,99591'
+ZIP_CODES = [z.strip() for z in _zips_env.split(',') if z.strip()]
+
+# --- Marine forecast (optional) ---------------------------------------------
+# NWS publishes coastal marine forecasts as text bulletins covering several
+# zones each. To get one, set MARINE_ZONE to the zone id (for example PKZ766)
+# and MARINE_URL to the bulletin that contains it. Set MARINE_ZONE to an empty
+# value to turn the marine forecast off.
+#
+# Default: on for the Pribilof zone when only the built-in zip codes are in
+# use, otherwise off (a zone has to be chosen for wherever you are).
+_pribilof_preset = (not _locations_env and bool(ZIP_CODES)
+                    and all(z in BUILTIN_ZIPS for z in ZIP_CODES))
+_zone_env = os.environ.get('MARINE_ZONE')
+MARINE_ZONE = (_zone_env if _zone_env is not None
+               else ('PKZ766' if _pribilof_preset else '')).strip().upper()
+_is_pribilof_zone = MARINE_ZONE == 'PKZ766'
+MARINE_URL = os.getenv('MARINE_URL') or (
+    'https://tgftp.nws.noaa.gov/data/raw/fz/fzak52.pafc.cwf.alu.txt' if _is_pribilof_zone else '')
+MARINE_ZONE_NAME = os.getenv('MARINE_ZONE_NAME') or (
+    'Pribilof Islands Nearshore Waters' if _is_pribilof_zone else MARINE_ZONE)
+# Base name of the marine output files (<name>.json and <name>.txt).
+MARINE_FILE = os.getenv('MARINE_FILE') or (
+    'pribilof_island_waters' if _is_pribilof_zone else f'marine_{MARINE_ZONE.lower()}')
+MARINE_TITLE = ('PRIBILOF ISLANDS MARINE FORECAST' if _is_pribilof_zone
+                else f'MARINE FORECAST {MARINE_ZONE}')
+
+
+def parse_locations(text: str) -> List[Dict]:
+    """Turn LOCATIONS ("Name,lat,lon;Name,lat,lon") into a list of places.
+
+    A bad entry is reported and skipped; it does not stop the others.
+    """
+    places = []
+    for entry in text.split(';'):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            name, lat, lon = [part.strip() for part in entry.rsplit(',', 2)]
+            lat, lon = float(lat), float(lon)
+            if not name or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError('name missing or coordinates out of range')
+        except ValueError as e:
+            logging.getLogger(__name__).error(
+                f"Ignoring LOCATIONS entry '{entry}' (expected Name,lat,lon): {e}")
+            continue
+        places.append({'key': file_slug(name), 'zip_code': None,
+                       'city': name, 'lat': lat, 'lon': lon})
+    return places
+
+
+def file_slug(name: str) -> str:
+    """Lower-case name safe for a file name: "St. Paul Island" -> "st._paul_island"."""
+    return re.sub(r'[^a-z0-9._-]+', '_', name.lower()).strip('_') or 'location'
+
+
+def file_stem(key: str, place_data: Dict) -> str:
+    """Base file name for one place: "<name>_<zip>", or just "<name>" for a
+    LOCATIONS entry that has no zip code."""
+    slug = file_slug(place_data.get('location') or key)
+    zip_code = place_data.get('zip_code')
+    return f'{slug}_{zip_code}' if zip_code else slug
 
 
 def local_now() -> datetime:
@@ -96,8 +178,9 @@ class WeatherForecastFetcher:
     
     BASE_URL = NWS_API_URL
 
-    def __init__(self, zip_codes: List[str]):
+    def __init__(self, zip_codes: List[str], locations: Optional[List[Dict]] = None):
         self.zip_codes = zip_codes
+        self.locations = locations or []
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': USER_AGENT,
@@ -136,25 +219,47 @@ class WeatherForecastFetcher:
         raise last_error
 
     def get_coordinates_from_zip(self, zip_code: str) -> Optional[Dict]:
-        """Get latitude and longitude from zip code using geocoding API"""
+        """Turn a zip code into {'lat', 'lon', 'city'}.
+
+        Order: built-in table, then zip_cache.json, then one request to the
+        lookup service (whose answer is saved so it is only asked once).
+        """
+        if zip_code in BUILTIN_ZIPS:
+            return BUILTIN_ZIPS[zip_code]
+        if not re.fullmatch(r'\d{5}', zip_code):
+            logger.error(f"'{zip_code}' is not a 5-digit US zip code; skipping it")
+            return None
+
+        cache = {}
         try:
-            # Using a simple geocoding approach via NWS
-            # For Alaska zip codes, we'll use known coordinates
-            alaska_zips = {
-                '99660': {'lat': 57.1253, 'lon': -170.2806, 'city': 'St. Paul Island'},
-                '99591': {'lat': 56.5983, 'lon': -169.5464, 'city': 'St. George Island'}
-            }
-            
-            if zip_code in alaska_zips:
-                return alaska_zips[zip_code]
-            
-            logger.warning(f"Zip code {zip_code} not in predefined list")
-            return None
-            
+            with open(ZIP_CACHE_FILE) as f:
+                cache = json.load(f)
+        except (OSError, ValueError):
+            pass
+        if zip_code in cache:
+            return cache[zip_code]
+
+        try:
+            response = self._get(ZIP_LOOKUP_URL.format(zip=zip_code))
+            if response.status_code == 404:
+                logger.error(f"Zip code {zip_code} is not known to the lookup service; "
+                             f"use LOCATIONS=Name,lat,lon for this place instead")
+                return None
+            response.raise_for_status()
+            place = response.json()['places'][0]
+            coords = {'lat': round(float(place['latitude']), 4),
+                      'lon': round(float(place['longitude']), 4),
+                      'city': place['place name']}
         except Exception as e:
-            logger.error(f"Error getting coordinates for {zip_code}: {e}")
+            logger.error(f"Could not look up zip code {zip_code}: {e}")
+            self._fail(e)
             return None
-    
+
+        cache[zip_code] = coords
+        write_json(ZIP_CACHE_FILE, cache)
+        logger.info(f"Zip code {zip_code} is {coords['city']} ({coords['lat']}, {coords['lon']})")
+        return coords
+
     def get_forecast_urls(self, lat: float, lon: float) -> Optional[Dict]:
         """Get forecast URLs from NWS points endpoint.
 
@@ -215,11 +320,22 @@ class WeatherForecastFetcher:
             return None
     
     def get_marine_forecast(self, lat: float, lon: float) -> Optional[Dict]:
-        """Get marine forecast for coastal areas"""
+        """Get the marine forecast for MARINE_ZONE from its NWS text bulletin.
+
+        Returns {zone_id: {...}}, or None if the marine forecast is turned
+        off or could not be fetched.
+        """
+        if not MARINE_ZONE:
+            return None
+        if not MARINE_URL:
+            logger.error(f"MARINE_ZONE is {MARINE_ZONE} but MARINE_URL is not set; "
+                         f"skipping the marine forecast")
+            return None
+        zone = MARINE_ZONE
         try:
             marine_data = {}
             
-            # Fetch PKZ766 from NOAA text product
+            # Fetch the zone's section from the NOAA text product
             try:
                 text_url = MARINE_URL
                 response = self._get(text_url)
@@ -227,39 +343,37 @@ class WeatherForecastFetcher:
                 if response.status_code == 200:
                     text_content = response.text
                     
-                    if 'PKZ766' not in text_content:
-                        raise ValueError('PKZ766 section not found in the marine bulletin')
+                    if zone not in text_content:
+                        raise ValueError(f'{zone} section not found in the marine bulletin')
 
-                    # Parse the text to find PKZ766 section
-                    if 'PKZ766' in text_content:
-                        # Extract the PKZ766 section
-                        lines = text_content.split('\n')
-                        pkz766_content = []
-                        in_pkz766 = False
-                        
-                        for i, line in enumerate(lines):
-                            if 'PKZ766' in line:
-                                in_pkz766 = True
-                                pkz766_content.append(line)
-                                continue
-                            
-                            if in_pkz766:
-                                # Stop at next zone or $$ marker
-                                if line.startswith('PKZ') and 'PKZ766' not in line:
-                                    break
-                                if line.strip() == '$$':
-                                    break
-                                pkz766_content.append(line)
-                        
-                        if pkz766_content:
-                            marine_data['PKZ766'] = {
-                                'name': 'Pribilof Islands Nearshore Waters',
-                                'raw_text': '\n'.join(pkz766_content),
-                                'source': text_url
-                            }
-                            logger.info("Successfully fetched PKZ766 marine forecast")
+                    # A section starts at the line naming the zone and ends
+                    # at the next zone header or the "$$" end marker.
+                    lines = text_content.split('\n')
+                    zone_content = []
+                    in_zone = False
+
+                    for line in lines:
+                        if zone in line and not in_zone:
+                            in_zone = True
+                            zone_content.append(line)
+                            continue
+
+                        if in_zone:
+                            if re.match(r'[A-Z]{2}Z\d{3}', line) and zone not in line:
+                                break
+                            if line.strip() == '$$':
+                                break
+                            zone_content.append(line)
+
+                    if zone_content:
+                        marine_data[zone] = {
+                            'name': MARINE_ZONE_NAME,
+                            'raw_text': '\n'.join(zone_content),
+                            'source': text_url
+                        }
+                        logger.info(f"Successfully fetched {zone} marine forecast")
             except Exception as e:
-                logger.warning(f"Could not fetch PKZ766 text product: {e}")
+                logger.warning(f"Could not fetch {zone} text product: {e}")
                 self._fail(e)
             
             return marine_data if marine_data else None
@@ -278,17 +392,25 @@ class WeatherForecastFetcher:
         self._context = 'marine'
         marine_forecast = self.get_marine_forecast(0, 0)
 
-        for zip_code in self.zip_codes:
-            logger.info(f"Fetching forecast for zip code: {zip_code}")
+        # Zip codes first, then any LOCATIONS entries. 'key' is what the place
+        # is filed under in latest_forecast.json and in the health file.
+        targets = [{'key': z, 'zip_code': z} for z in self.zip_codes] + self.locations
+
+        for target in targets:
+            zip_code = target['key']
+            logger.info(f"Fetching forecast for: {zip_code}")
             self._context = zip_code
-            
-            coords = self.get_coordinates_from_zip(zip_code)
-            if not coords:
-                logger.warning(f"Could not get coordinates for {zip_code}")
-                continue
-            
+
+            if target.get('zip_code'):
+                coords = self.get_coordinates_from_zip(target['zip_code'])
+                if not coords:
+                    logger.warning(f"Could not get coordinates for {zip_code}")
+                    continue
+            else:
+                coords = target
+
             zip_data = {
-                'zip_code': zip_code,
+                'zip_code': target.get('zip_code'),
                 'location': coords['city'],
                 'coordinates': {'lat': coords['lat'], 'lon': coords['lon']},
                 # Alaska time with its UTC offset (-09:00 AKST / -08:00 AKDT).
@@ -318,6 +440,13 @@ class WeatherForecastFetcher:
                             'periods': hourly_forecast.get('periods', [])[:24]  # Next 24 hours
                         }
 
+            elif forecast_urls:
+                # NWS knows the point but offers no forecast for it: it is
+                # over open water or outside the area NWS covers.
+                detail = 'NWS has no forecast for these coordinates (over water or outside its coverage)'
+                logger.error(f"{zip_code}: {detail}")
+                self.failures[zip_code] = (diagnose.OUR_ERROR, detail)
+
             # Marine forecast (fetched once above)
             if marine_forecast:
                 zip_data['marine_forecast'] = marine_forecast
@@ -338,7 +467,10 @@ class WeatherForecastFetcher:
         
         for zip_code, zip_data in data.items():
             output.append(f"\n{'='*80}")
-            output.append(f"ZIP CODE: {zip_code} - {zip_data['location']}")
+            if zip_data.get('zip_code'):
+                output.append(f"ZIP CODE: {zip_code} - {zip_data['location']}")
+            else:
+                output.append(f"LOCATION: {zip_data['location']}")
             output.append(f"Coordinates: {zip_data['coordinates']['lat']}, {zip_data['coordinates']['lon']}")
             output.append(f"{'='*80}")
             
@@ -364,7 +496,7 @@ class WeatherForecastFetcher:
                         for period in zone_data['periods'][:3]:  # First 3 periods
                             output.append(f"  {period.get('name', 'N/A')}:")
                             output.append(f"    {period.get('detailedForecast', 'No details available')}")
-            else:
+            elif MARINE_ZONE:
                 output.append(f"\n--- MARINE FORECAST ---")
                 output.append("No marine forecast data available")
         
@@ -375,14 +507,20 @@ class WeatherForecastFetcher:
 def main():
     """Main application entry point"""
     # Configuration
-    zip_codes = os.getenv('ZIP_CODES', '99660,99591').split(',')
+    zip_codes = ZIP_CODES
+    locations = parse_locations(_locations_env)
     update_interval = int(os.getenv('UPDATE_INTERVAL', '3600'))  # Default 1 hour
     
     logger.info(f"Starting Weather Forecast Application")
-    logger.info(f"Monitoring zip codes: {', '.join(zip_codes)}")
+    logger.info(f"Monitoring zip codes: {', '.join(zip_codes) or 'none'}")
+    if locations:
+        logger.info(f"Monitoring locations: {', '.join(p['city'] for p in locations)}")
+    logger.info(f"Marine forecast: {MARINE_ZONE + ' (' + MARINE_ZONE_NAME + ')' if MARINE_ZONE else 'off'}")
+    if not zip_codes and not locations:
+        logger.error("Nothing to fetch: set ZIP_CODES or LOCATIONS")
     logger.info(f"Update interval: {update_interval} seconds")
     
-    fetcher = WeatherForecastFetcher(zip_codes)
+    fetcher = WeatherForecastFetcher(zip_codes, locations)
     monitor = ForecastMonitor()
     logger.info("Forecast health monitoring enabled")
     run_once = os.getenv('RUN_ONCE', '').lower() in ('1', 'true', 'yes')
@@ -400,8 +538,7 @@ def main():
                 if zip_data.get('local_forecast'):
                     continue
                 failed_local.add(zip_code)
-                island_name = zip_data.get('location', zip_code).replace(' ', '_').lower()
-                previous_file = os.path.join(DATA_DIR, f'{island_name}_{zip_code}.json')
+                previous_file = os.path.join(DATA_DIR, f'{file_stem(zip_code, zip_data)}.json')
                 try:
                     with open(previous_file) as f:
                         previous = json.load(f)
@@ -424,15 +561,15 @@ def main():
             # Save individual island forecasts
             marine_forecasts_combined = {}
             for zip_code, zip_data in forecasts.items():
-                island_name = zip_data.get('location', zip_code).replace(' ', '_').lower()
+                stem = file_stem(zip_code, zip_data)
 
                 # Save individual JSON
-                individual_json = os.path.join(DATA_DIR, f'{island_name}_{zip_code}.json')
+                individual_json = os.path.join(DATA_DIR, f'{stem}.json')
                 write_json(individual_json, zip_data)
                 logger.info(f"Saved {zip_data.get('location')} data to {individual_json}")
 
                 # Save individual formatted text
-                individual_txt = os.path.join(DATA_DIR, f'{island_name}_{zip_code}.txt')
+                individual_txt = os.path.join(DATA_DIR, f'{stem}.txt')
                 individual_formatted = fetcher.format_output({zip_code: zip_data})
                 atomic_write(individual_txt, individual_formatted)
                 logger.info(f"Saved {zip_data.get('location')} formatted forecast to {individual_txt}")
@@ -445,15 +582,15 @@ def main():
             
             # Save separate marine forecast file
             if marine_forecasts_combined:
-                marine_json = os.path.join(DATA_DIR, 'pribilof_island_waters.json')
+                marine_json = os.path.join(DATA_DIR, f'{MARINE_FILE}.json')
                 write_json(marine_json, marine_forecasts_combined)
                 logger.info(f"Saved marine forecast data to {marine_json}")
 
                 # Format marine forecast text
-                marine_txt = os.path.join(DATA_DIR, 'pribilof_island_waters.txt')
+                marine_txt = os.path.join(DATA_DIR, f'{MARINE_FILE}.txt')
                 marine_output = []
                 marine_output.append("=" * 80)
-                marine_output.append(f"PRIBILOF ISLANDS MARINE FORECAST - {local_now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                marine_output.append(f"{MARINE_TITLE} - {local_now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
                 marine_output.append("=" * 80)
                 marine_output.append("")
                 
@@ -512,7 +649,9 @@ def main():
             # zone id for both success and failure. (Failures used to be
             # filed under '<zip>_marine' while successes went to 'PKZ766',
             # so an outage could never be marked as over.)
-            if marine_forecasts_combined:
+            if not MARINE_ZONE:
+                pass  # marine forecast is turned off: nothing to record
+            elif marine_forecasts_combined:
                 for zone_id in marine_forecasts_combined:
                     monitor.record_attempt(
                         location=zone_id,
@@ -522,7 +661,7 @@ def main():
             else:
                 cause, detail = fetcher.failures.get('marine', (None, None))
                 monitor.record_attempt(
-                    location='PKZ766',
+                    location=MARINE_ZONE,
                     forecast_type='marine',
                     success=False,
                     error_message=detail or "No marine forecast data available",

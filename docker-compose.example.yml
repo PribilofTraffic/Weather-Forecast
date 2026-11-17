@@ -1,4 +1,15 @@
-version: '3.8'
+# Example Docker Compose file for the weather forecast collector.
+#
+# Quick start:
+#   git clone https://github.com/PribilofTraffic/Weather-Forecast.git
+#   cd Weather-Forecast
+#   cp docker-compose.example.yml docker-compose.yml
+#   # edit the settings below, then:
+#   docker compose up -d
+#
+# Forecast files appear in ./data within a few seconds.
+# Forecasts come from the US National Weather Service, so this works for
+# places in the United States and its territories.
 
 services:
   weather-forecast:
@@ -6,27 +17,46 @@ services:
     container_name: weather-forecast
     restart: unless-stopped
     environment:
-      # Comma-separated list of zip codes to monitor
-      # Examples:
-      #   Alaska: 99660,99591 (St. Paul & St. George Islands)
-      #   New York: 10001,10002
-      #   California: 90001,90002
-      - ZIP_CODES=99660,99591
-      
-      # Update interval in seconds
-      # 300 = 5 minutes
-      # 1800 = 30 minutes
-      # 3600 = 1 hour (default)
-      # 7200 = 2 hours
+      # Your time zone. Times in the output follow it, including the switch
+      # between standard and daylight time.
+      # List: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+      - TZ=America/Anchorage
+
+      # WHERE: use ZIP_CODES, LOCATIONS, or both.
+      #
+      # US zip codes, comma-separated. Each one is turned into coordinates
+      # once (through api.zippopotam.us) and remembered in data/zip_cache.json.
+      - ZIP_CODES=99501,99701
+
+      # Places a zip code does not describe well, as "Name,latitude,longitude"
+      # separated by semicolons. No lookup service is involved for these.
+      # - LOCATIONS=Cabin,61.52,-149.63;Boat Harbor,60.12,-149.44
+
+      # How often to fetch, in seconds. NWS refreshes its forecast about once
+      # an hour, so a shorter interval only returns the same answer.
       - UPDATE_INTERVAL=3600
+
+      # MARINE FORECAST (optional, off unless MARINE_ZONE is set).
+      # Find your zone id and its text bulletin at
+      # https://www.weather.gov/marine/ then set both:
+      # - MARINE_ZONE=PKZ766
+      # - MARINE_URL=https://tgftp.nws.noaa.gov/data/raw/fz/fzak52.pafc.cwf.alu.txt
+      # - MARINE_ZONE_NAME=Pribilof Islands Nearshore Waters
+
+      # NWS asks API users to identify themselves with an app name and a
+      # contact, so they can reach you instead of blocking you.
+      # - USER_AGENT=my-forecast-collector/1.0 (you@example.com)
+
+      # ALERTS (optional): push a message to an ntfy server when a forecast
+      # source stays down. See https://ntfy.sh
+      # - NTFY_URL=https://ntfy.sh
+      # - NTFY_TOPIC=my-forecast-alerts
+      # - NTFY_TOKEN=
     volumes:
-      # Mount data directory to persist forecast data
-      - ./data:/app/data
+      # Forecast files are written here
+      - ./data:/data
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-
-# Note: This app fetches forecasts from NOAA National Weather Service API
-# Find zip codes: https://www.zip-codes.com/
