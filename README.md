@@ -33,7 +33,7 @@ Environment variables (set in docker-compose.yml):
 - **On a failed fetch** the previous island forecast is kept, with its old timestamp, instead of being replaced by an empty one.
 - **Failures are diagnosed** (`diagnose.py`) as `local_network` (our internet), `source_down` (NWS not answering), `source_stale` (NWS answering with an old forecast) or `our_error` (format changed, URL gone, refused). The cause is written to `forecast_health.json`, `forecast_report.txt` and the alert. Our own fault alerts at once; a source-side problem alerts once after three cycles; an internet outage here is only summarised when the link returns.
 - **Container health** (`docker ps`) is healthy while `latest_forecast.json` is newer than two update intervals plus ten minutes.
-- **Readers on this host**: the hourly cron job `pribiloftraffic/scripts/update_forecast_data.sh` copies three files into the webroot as `snp_forecast.json`, `stg_forecast.json` and `marine_forecast.json`; `pribobs_commentary.py` reads `latest_forecast.txt` directly. Do not rename the output files.
+- **Readers on this host**: `pribiloftraffic/data/snp_forecast.json`, `stg_forecast.json` and `marine_forecast.json` are symlinks to `st._paul_island_99660.json`, `st._george_island_99591.json` and `pribilof_island_waters.json` in this folder's `data/`, so the site reads these files directly; `pribobs_commentary.py` reads `latest_forecast.txt` directly. Do not move `data/` or rename the output files. (`sync_to_web.sh` and the old hourly cron copy are no longer needed.)
 
 ## Output Files
 
