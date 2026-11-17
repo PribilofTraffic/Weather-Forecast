@@ -167,3 +167,7 @@ All settings are environment variables in `docker-compose.yml`.
 ## Using the files from a website
 
 A web server or another script can read the files straight from `data/`. Each file is written to a temporary name and then renamed, so a reader never sees a half-written file. If something reads these files, do not move `data/` or rename the outputs without updating it.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
