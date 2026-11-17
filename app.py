@@ -14,6 +14,29 @@ import os
 
 from monitor import ForecastMonitor
 
+
+def notify_ntfy(title, alerts):
+    """Push active alerts to the self-hosted ntfy server. No-op if unconfigured.
+    Stateless — sends whatever alerts are currently active on each run."""
+    url = os.getenv('NTFY_URL')
+    topic = os.getenv('NTFY_TOPIC')
+    if not url or not topic or not alerts:
+        return
+    headers = {
+        'Title': title,
+        'Priority': os.getenv('NTFY_PRIORITY', 'high'),
+        'Tags': 'warning',
+    }
+    token = os.getenv('NTFY_TOKEN')
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    try:
+        requests.post(f"{url.rstrip('/')}/{topic}",
+                      data='\n'.join(alerts).encode('utf-8'),
+                      headers=headers, timeout=10)
+    except Exception as e:
+        logger.warning(f"ntfy notify failed: {e}")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -166,7 +189,15 @@ class WeatherForecastFetcher:
                         'updated': local_forecast.get('updated'),
                         'periods': local_forecast.get('periods', [])[:7]  # Next 7 periods
                     }
-            
+                # Get hourly forecast
+                if forecast_urls.get('forecast_hourly'):
+                    hourly_forecast = self.get_forecast(forecast_urls['forecast_hourly'])
+                    if hourly_forecast:
+                        zip_data['hourly_forecast'] = {
+                            'updated': hourly_forecast.get('updated'),
+                            'periods': hourly_forecast.get('periods', [])[:24]  # Next 24 hours
+                        }
+
             # Get marine forecast
             marine_forecast = self.get_marine_forecast(coords['lat'], coords['lon'])
             if marine_forecast:
@@ -359,6 +390,7 @@ def main():
                 logger.warning("FORECAST ALERTS:")
                 for alert in alerts:
                     logger.warning(f"  {alert}")
+                notify_ntfy("Weather forecast alerts", alerts)
             
             # Generate status report
             monitor.save_report()
