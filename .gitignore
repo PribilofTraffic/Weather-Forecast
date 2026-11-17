@@ -1,6 +1,10 @@
-# Data files
-data/*.json
-data/*.txt
+# Your own settings: created by copying docker-compose.example.yml.
+# Ignored so that pulling updates never touches them.
+docker-compose.yml
+docker-compose.override.yml
+
+# Data files: forecasts, health history and the zip code cache
+data/
 *.log
 
 # Python

@@ -37,6 +37,15 @@ Within a few seconds the forecast files appear in `./data`:
 cat data/latest_forecast.txt
 ```
 
+## Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+Pulling an update does not touch your settings or your data. Your `docker-compose.yml`, any `.env` file and the whole `data/` folder (forecasts, health history, remembered zip codes) are ignored by Git, so they stay exactly as you left them. New settings are added with defaults that keep existing setups working; check `docker-compose.example.yml` after an update to see what is new.
+
 ## Choosing places
 
 Use either setting, or both.
