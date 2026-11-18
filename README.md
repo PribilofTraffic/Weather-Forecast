@@ -14,6 +14,8 @@ As the weather pages looked on the afternoon of 18 Nov 2026.
 
 ![St. George 7-day forecast, updated 2:02 PM AKST.](docs/site/st-george-forecast.png)
 
+The Docker setup on the island started from the SDR Enthusiasts guide, [ADS-B Reception, Decoding & Sharing with Docker](https://sdr-enthusiasts.gitbook.io/ads-b).
+
 ## What it does
 
 - Fetches the 7-period forecast and the next 24 hours, hour by hour, for each place you list.
