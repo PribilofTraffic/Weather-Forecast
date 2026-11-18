@@ -4,6 +4,16 @@ A small Docker service that fetches National Weather Service forecasts on a sche
 
 It was built for the Pribilof Islands, St. Paul and St. George, two small islands in the Bering Sea off Alaska, where the weather decides whether planes land and boats go out. It feeds the forecast pages on [pribiloftraffic.com](https://www.pribiloftraffic.com). It works for any place the US National Weather Service covers: give it a zip code or a pair of coordinates.
 
+## On pribiloftraffic.com
+
+[St. Paul weather](https://www.pribiloftraffic.com/snpweather/) and [St. George weather](https://www.pribiloftraffic.com/stgweather/) show the 7-day forecast, and the marine forecast for the nearshore waters further down the same pages. The [St. Paul](https://www.pribiloftraffic.com/pasnapproach/) and [St. George](https://www.pribiloftraffic.com/papbapproach/) approach pages read the same local forecast.
+
+As the weather pages looked on the afternoon of 18 Nov 2026.
+
+![St. Paul 7-day forecast, updated 2:02 PM AKST.](docs/site/st-paul-forecast.png)
+
+![St. George 7-day forecast, updated 2:02 PM AKST.](docs/site/st-george-forecast.png)
+
 ## What it does
 
 - Fetches the 7-period forecast and the next 24 hours, hour by hour, for each place you list.
