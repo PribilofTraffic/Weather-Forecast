@@ -15,7 +15,7 @@ services:
   weather-forecast:
     build: .
     container_name: weather-forecast
-    restart: unless-stopped
+    restart: always
     environment:
       # Your time zone. Times in the output follow it, including the switch
       # between standard and daylight time.
